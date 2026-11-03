@@ -250,27 +250,50 @@ The [picking info](../../developer-guide/interactivity.md#the-pickinginfo-object
 
 Note that the `bitmap` field can be `null` if on mouse leave or if the bitmap has not yet loaded.
 
-The following code reads the picked pixel color from the bitmap when the layer is clicked:
+The following code reads the picked pixel color from the bitmap when the layer is clicked. It copies the pixel from the texture into a GPU buffer, then reads the buffer back on the CPU:
 
 ```ts
+import {BitmapLayer} from '@deck.gl/layers';
+import type {BitmapLayerPickingInfo} from '@deck.gl/layers';
+import {Buffer} from '@luma.gl/core';
+import type {Texture} from '@luma.gl/core';
+
+async function readPickedColor({bitmap, layer}: BitmapLayerPickingInfo): Promise<Uint8Array | null> {
+  if (!bitmap || !layer) {
+    return null;
+  }
+  const {device} = layer.context;
+  const texture = (layer as BitmapLayer).props.image as Texture;
+  const region = {x: bitmap.pixel[0], y: bitmap.pixel[1], width: 1, height: 1};
+  // WebGPU pads every row of a texture-to-buffer copy, so ask the texture for the size
+  const {byteLength} = texture.computeMemoryLayout(region);
+  const buffer = device.createBuffer({byteLength, usage: Buffer.COPY_DST | Buffer.MAP_READ});
+  try {
+    texture.readBuffer(region, buffer);
+    const data = await buffer.readAsync(0, byteLength);
+    return data.subarray(0, 4); // [r, g, b, a]
+  } finally {
+    buffer.destroy();
+  }
+}
+
 new BitmapLayer({
   image: './my-image.png',
   bounds: [-122.45, 37.75, -122.43, 37.78],
   pickable: true,
-  onClick: ({bitmap, layer}) => {
-    if (bitmap) {
-      const {device} = layer.context;
-      const pixelColor = device.readPixelsToArrayWebGL(layer.props.image, {
-        sourceX: bitmap.pixel[0],
-        sourceY: bitmap.pixel[1],
-        sourceWidth: 1,
-        sourceHeight: 1
-      });
-      console.log('Color at picked pixel:', pixelColor);
-    }
+  onClick: info => {
+    readPickedColor(info as BitmapLayerPickingInfo).then(color => {
+      console.log('Color at picked pixel:', color);
+    });
   }
-})
+});
 ```
+
+:::info
+`Texture.readBuffer()` requires deck.gl 9.3 or later. Earlier versions can use `device.readPixelsToArrayWebGL()` instead, which only works with WebGL.
+
+On WebGPU, `readBuffer()` can only read a texture that was created with `Texture.COPY_SRC` usage. The texture that `BitmapLayer` creates from the `image` prop does not have this usage, so the example above reads the pixel on WebGL only.
+:::
 
 ## Source
 
